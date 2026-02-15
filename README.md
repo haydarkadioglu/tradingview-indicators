@@ -118,7 +118,80 @@ code indicators/buy-sell-signals/buy_sell_indicator.pine
 3. Add README:
    ```powershell
    New-Item indicators/my-new-indicator/README.md
-   ```
+   ```---
+
+## 🤖 Machine Learning Indicators
+
+**Advanced prediction algorithms in dedicated ML folder**
+
+See [ML Indicators Collection](indicators/ml-indicators/README.md) for complete documentation.
+
+### Quick Overview
+
+| Indicator | Type | Accuracy | Best For |
+|-----------|------|----------|----------|
+| [KNN Predictor](indicators/ml-indicators/knn-predictor/README.md) | Pattern Matching | 60-70% | Pattern recognition |
+| [Ensemble Predictor](indicators/ml-indicators/ensemble-predictor/README.md) | Multi-Algorithm | 65-75% | Balanced consensus |
+| [Decision Tree](indicators/ml-indicators/decision-tree/README.md) | Rule-Based | 55-65% | Trend following |
+| [Neural Network](indicators/ml-indicators/neural-network/) | Deep Learning* | 70-80% | Complex patterns |
+
+*Neural Network: Planned, with implementation plan ready
+
+---
+
+## 📊 Technical Indicators
+
+### 1. 📈 Support & Resistance Indicator
+
+**Dynamic S/R level detection with machine learning**
+
+- **Purpose**: Automatic support/resistance identification
+- **Method**: Price action analysis with statistical validation
+- **Output**: Visual levels with strength indicators
+- **Features**:
+  - Real-time level updates
+  - Breakout detection
+  - Historical level tracking
+  - Multi-timeframe support
+
+[📖 Read Full Documentation](indicators/support-resistance/README.md)
+
+---
+
+### 2. 📊 Trend Strength Signals [Enhanced]
+
+**Dynamic trend detection with visual strength gauge**
+
+- **Purpose**: Bollinger Bands-based trend momentum indicator
+- **Method**: Statistical deviation analysis with visual feedback
+- **Output**: Trend direction, strength gauge, TP signals
+- **Features**:
+  - Real-time trend strength visualization
+  - Dynamic cloud with gradient coloring
+  - Automatic take profit signals
+  - Multi-timeframe compatible
+
+[📖 Read Full Documentation](indicators/trend-strength/README.md)
+
+---
+
+### 3. 🚀 Supertrend Enhanced
+
+**Advanced Supertrend with intelligent signal filtering**
+
+- **Purpose**: Trend-following with quality filters
+- **Method**: ATR-based bands with RSI, volume, and MTF confirmation
+- **Output**: Filtered BUY/SELL signals with quality scores
+- **Features**:
+  - RSI and volume filters
+  - Multi-timeframe confirmation
+  - Trend strength panel (0-100%)
+  - Quality scoring system
+  - Rejected signal visualization
+
+[📖 Read Full Documentation](indicators/supertrend-enhanced/README.md)
+
+---
 
 ### Pine Script v5 Best Practices
 
@@ -160,41 +233,6 @@ MIT License - See LICENSE file for details.
 ## 💬 Contributing
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
-
----
-
-### 5. 📊 Trend Strength Signals [Enhanced]
-
-**Dynamic trend detection with visual strength gauge**
-
-- **Purpose**: Bollinger Bands-based trend momentum indicator
-- **Method**: Statistical deviation analysis with visual feedback
-- **Output**: Trend direction, strength gauge, TP signals
-- **Features**:
-  - Real-time trend strength visualization
-  - Dynamic cloud with gradient coloring
-  - Automatic take profit signals
-  - Multi-timeframe compatible
-
-[📖 Read Full Documentation](indicators/trend-strength/README.md)
-
----
-
-### 6. 🚀 Supertrend Enhanced
-
-**Advanced Supertrend with intelligent signal filtering**
-
-- **Purpose**: Trend-following with quality filters
-- **Method**: ATR-based bands with RSI, volume, and MTF confirmation
-- **Output**: Filtered BUY/SELL signals with quality scores
-- **Features**:
-  - RSI and volume filters
-  - Multi-timeframe confirmation
-  - Trend strength panel (0-100%)
-  - Quality scoring system
-  - Rejected signal visualization
-
-[📖 Read Full Documentation](indicators/supertrend-enhanced/README.md)
 
 ---
 
