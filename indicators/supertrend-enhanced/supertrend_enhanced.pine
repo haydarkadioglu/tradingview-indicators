@@ -1,0 +1,202 @@
+//@version=5
+indicator("Supertrend Enhanced", overlay=true, shorttitle="ST Enhanced", max_bars_back=500, dynamic_requests=true)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// Core Settings
+atr_period = input.int(10, "ATR Period", minval=1, maxval=50, group="Core Settings", tooltip="Period for ATR calculation")
+atr_multiplier = input.float(3.0, "ATR Multiplier", minval=0.1, maxval=10.0, step=0.1, group="Core Settings", tooltip="Multiplier for ATR bands")
+src = input.source(hl2, "Source", group="Core Settings", tooltip="Price source for calculation")
+change_atr = input.bool(true, "Use True ATR", group="Core Settings", tooltip="true=ATR, false=SMA of TR")
+
+// Signal Filters
+use_rsi_filter = input.bool(true, "Enable RSI Filter", group="Signal Filters", tooltip="Filter signals with RSI levels")
+rsi_period = input.int(14, "RSI Period", minval=5, maxval=50, group="Signal Filters")
+rsi_buy_max = input.int(65, "RSI Max for BUY", minval=50, maxval=80, group="Signal Filters", tooltip="Don't buy if RSI above this")
+rsi_sell_min = input.int(35, "RSI Min for SELL", minval=20, maxval=50, group="Signal Filters", tooltip="Don't sell if RSI below this")
+
+use_volume_filter = input.bool(true, "Enable Volume Filter", group="Signal Filters", tooltip="Require strong volume for signals")
+volume_mult = input.float(1.2, "Volume Multiplier", minval=0.5, maxval=3.0, step=0.1, group="Signal Filters", tooltip="Minimum volume vs avg")
+
+// Multi-Timeframe
+use_mtf = input.bool(false, "Enable MTF Confirmation", group="Multi-Timeframe", tooltip="Confirm with higher timeframe")
+mtf_timeframe = input.timeframe("60", "Higher Timeframe", group="Multi-Timeframe")
+
+// Display Settings
+show_signals = input.bool(true, "Show Buy/Sell Signals", group="Display")
+show_labels = input.bool(true, "Show Labels on Signals", group="Display")
+highlighting = input.bool(true, "Highlight Trend", group="Display")
+show_strength = input.bool(true, "Show Trend Strength Panel", group="Display")
+panel_position = input.string("Top Right", "Panel Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Display")
+
+// Colors
+bull_color = input.color(#00ff00, "Bullish Color", group="Colors")
+bear_color = input.color(#ff0000, "Bearish Color", group="Colors")
+
+// ============================================================================
+// SUPERTREND CALCULATION (Original Logic)
+// ============================================================================
+// ATR Calculation
+atr2 = ta.sma(ta.tr, atr_period)
+atr = change_atr ? ta.atr(atr_period) : atr2
+
+// Upper and Lower Bands
+up = src - (atr_multiplier * atr)
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+
+dn = src + (atr_multiplier * atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+// Trend Direction
+var trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// Multi-timeframe confirmation (optional)
+mtf_trend = 0
+if use_mtf
+    mtf_atr2 = request.security(syminfo.tickerid, mtf_timeframe, ta.sma(ta.tr, atr_period))
+    mtf_atr = request.security(syminfo.tickerid, mtf_timeframe, change_atr ? ta.atr(atr_period) : mtf_atr2)
+    mtf_src = request.security(syminfo.tickerid, mtf_timeframe, src)
+    mtf_close = request.security(syminfo.tickerid, mtf_timeframe, close)
+    
+    mtf_up = mtf_src - (atr_multiplier * mtf_atr)
+    mtf_dn = mtf_src + (atr_multiplier * mtf_atr)
+    
+    var mtf_tr = 1
+    mtf_tr := mtf_tr == -1 and mtf_close > mtf_dn ? 1 : mtf_tr == 1 and mtf_close < mtf_up ? -1 : mtf_tr
+    mtf_trend := mtf_tr
+
+// ============================================================================
+// SIGNAL FILTERS
+// ============================================================================
+// RSI Filter
+rsi = ta.rsi(close, rsi_period)
+rsi_ok_for_buy = not use_rsi_filter or rsi < rsi_buy_max
+rsi_ok_for_sell = not use_rsi_filter or rsi > rsi_sell_min
+
+// Volume Filter
+avg_volume = ta.sma(volume, 20)
+volume_ok = not use_volume_filter or volume > avg_volume * volume_mult
+
+// MTF Filter
+mtf_ok_for_buy = not use_mtf or mtf_trend == 1
+mtf_ok_for_sell = not use_mtf or mtf_trend == -1
+
+// ============================================================================
+// TREND STRENGTH CALCULATION
+// ============================================================================
+// Distance from Supertrend line
+distance_from_st = trend == 1 ? (close - up) / up * 100 : (dn - close) / dn * 100
+max_distance = ta.highest(math.abs(distance_from_st), 50)
+strength = max_distance > 0 ? math.min(math.abs(distance_from_st) / max_distance * 100, 100) : 50
+
+// Trend duration
+var int trend_bars = 0
+if trend != trend[1]
+    trend_bars := 1
+else
+    trend_bars += 1
+
+// Overall quality score
+quality_score = 0
+if rsi_ok_for_buy or rsi_ok_for_sell
+    quality_score += 25
+if volume_ok
+    quality_score += 25
+if mtf_ok_for_buy or mtf_ok_for_sell
+    quality_score += 25
+if strength > 60
+    quality_score += 25
+
+// ============================================================================
+// BUY/SELL SIGNALS (WITH FILTERS)
+// ============================================================================
+buy_signal_raw = trend == 1 and trend[1] == -1
+sell_signal_raw = trend == -1 and trend[1] == 1
+
+// Apply filters
+buy_signal = buy_signal_raw and rsi_ok_for_buy and volume_ok and mtf_ok_for_buy
+sell_signal = sell_signal_raw and rsi_ok_for_sell and volume_ok and mtf_ok_for_sell
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+// Plot Supertrend lines
+upPlot = plot(trend == 1 ? up : na, title="Up Trend", style=plot.style_linebr, linewidth=2, color=bull_color)
+dnPlot = plot(trend == -1 ? dn : na, title="Down Trend", style=plot.style_linebr, linewidth=2, color=bear_color)
+
+// Trend highlights
+mPlot = plot(ohlc4, title="", style=plot.style_circles, linewidth=0, display=display.none)
+longFillColor = highlighting ? (trend == 1 ? color.new(bull_color, 95) : color.new(color.white, 100)) : color.new(color.white, 100)
+shortFillColor = highlighting ? (trend == -1 ? color.new(bear_color, 95) : color.new(color.white, 100)) : color.new(color.white, 100)
+fill(mPlot, upPlot, title="UpTrend Highlight", color=longFillColor)
+fill(mPlot, dnPlot, title="DownTrend Highlight", color=shortFillColor)
+
+// Raw signals (small dots)
+plotshape(buy_signal_raw, title="Buy Signal (Raw)", location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(bull_color, 50))
+plotshape(sell_signal_raw, title="Sell Signal (Raw)", location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(bear_color, 50))
+
+// Filtered signals (large arrows)
+plotshape(buy_signal and show_signals, title="BUY", text="BUY", location=location.belowbar, style=shape.labelup, size=size.normal, color=bull_color, textcolor=color.white)
+plotshape(sell_signal and show_signals, title="SELL", text="SELL", location=location.abovebar, style=shape.labeldown, size=size.normal, color=bear_color, textcolor=color.white)
+
+// Rejected signals (X marks)
+rejected_buy = buy_signal_raw and not buy_signal
+rejected_sell = sell_signal_raw and not sell_signal
+plotchar(rejected_buy and show_labels, title="Rejected BUY", char="✗", location=location.belowbar, color=color.orange, size=size.tiny)
+plotchar(rejected_sell and show_labels, title="Rejected SELL", char="✗", location=location.abovebar, color=color.orange, size=size.tiny)
+
+// Background color for strong trends
+bgcolor(trend == 1 and strength > 70 ? color.new(bull_color, 97) : na, title="Strong Bull BG")
+bgcolor(trend == -1 and strength > 70 ? color.new(bear_color, 97) : na, title="Strong Bear BG")
+
+// ============================================================================
+// TREND STRENGTH PANEL
+// ============================================================================
+if show_strength and barstate.islast
+    panel_pos = panel_position == "Top Left" ? position.top_left : panel_position == "Top Right" ? position.top_right : panel_position == "Bottom Left" ? position.bottom_left : position.bottom_right
+    
+    var table strength_table = table.new(panel_pos, 2, 6, border_width=2)
+    
+    // Header
+    header_color = trend == 1 ? color.new(bull_color, 20) : color.new(bear_color, 20)
+    table.cell(strength_table, 0, 0, "SUPERTREND", bgcolor=header_color, text_color=color.white, text_size=size.normal)
+    table.cell(strength_table, 1, 0, trend == 1 ? "BULLISH ⬆" : "BEARISH ⬇", bgcolor=header_color, text_color=color.white, text_size=size.normal)
+    
+    // Strength
+    strength_color = strength > 70 ? color.lime : strength > 40 ? color.yellow : color.orange
+    table.cell(strength_table, 0, 1, "Strength", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(strength_table, 1, 1, str.tostring(strength, "#") + "%", bgcolor=color.new(color.gray, 90), text_color=strength_color, text_size=size.small)
+    
+    // Duration
+    table.cell(strength_table, 0, 2, "Duration", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(strength_table, 1, 2, str.tostring(trend_bars) + " bars", bgcolor=color.new(color.gray, 90), text_color=color.white, text_size=size.small)
+    
+    // RSI
+    rsi_color = rsi > 70 ? color.red : rsi < 30 ? color.lime : color.yellow
+    table.cell(strength_table, 0, 3, "RSI", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(strength_table, 1, 3, str.tostring(rsi, "#.#"), bgcolor=color.new(color.gray, 90), text_color=rsi_color, text_size=size.small)
+    
+    // Volume
+    vol_ratio = volume / avg_volume
+    vol_color = vol_ratio > 1.5 ? color.lime : vol_ratio > 1.0 ? color.yellow : color.red
+    table.cell(strength_table, 0, 4, "Volume", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(strength_table, 1, 4, str.tostring(vol_ratio, "#.#") + "x", bgcolor=color.new(color.gray, 90), text_color=vol_color, text_size=size.small)
+    
+    // Quality Score
+    qual_color = quality_score >= 75 ? color.lime : quality_score >= 50 ? color.yellow : color.orange
+    table.cell(strength_table, 0, 5, "Quality", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(strength_table, 1, 5, str.tostring(quality_score) + "/100", bgcolor=color.new(color.gray, 90), text_color=qual_color, text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(buy_signal, title="SuperTrend BUY (Filtered)", message="🟢 SuperTrend BUY Signal!\nStrength: {{strength}}%\nRSI: {{rsi}}\nQuality: {{quality_score}}/100")
+alertcondition(sell_signal, title="SuperTrend SELL (Filtered)", message="🔴 SuperTrend SELL Signal!\nStrength: {{strength}}%\nRSI: {{rsi}}\nQuality: {{quality_score}}/100")
+alertcondition(buy_signal_raw, title="SuperTrend BUY (Raw)", message="SuperTrend Raw BUY (check filters!)")
+alertcondition(sell_signal_raw, title="SuperTrend SELL (Raw)", message="SuperTrend Raw SELL (check filters!)")
+alertcondition(trend != trend[1], title="SuperTrend Direction Change", message="SuperTrend changed direction!")

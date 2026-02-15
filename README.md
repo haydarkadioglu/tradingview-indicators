@@ -180,4 +180,22 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 
 ---
 
+### 6. 🚀 Supertrend Enhanced
+
+**Advanced Supertrend with intelligent signal filtering**
+
+- **Purpose**: Trend-following with quality filters
+- **Method**: ATR-based bands with RSI, volume, and MTF confirmation
+- **Output**: Filtered BUY/SELL signals with quality scores
+- **Features**:
+  - RSI and volume filters
+  - Multi-timeframe confirmation
+  - Trend strength panel (0-100%)
+  - Quality scoring system
+  - Rejected signal visualization
+
+[📖 Read Full Documentation](indicators/supertrend-enhanced/README.md)
+
+---
+
 **Happy Coding & Trading! 🚀📈**
