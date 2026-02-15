@@ -1,0 +1,145 @@
+//@version=5
+indicator("Support & Resistance Levels", overlay=true, shorttitle="S/R Levels", max_lines_count=500)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// Detection Settings
+pivot_length = input.int(5, "Pivot Length", minval=2, maxval=20, group="Detection Settings", tooltip="Number of bars to the left and right for pivot detection")
+lookback_bars = input.int(100, "Lookback Bars", minval=50, maxval=300, group="Detection Settings", tooltip="How many bars back to scan for levels")
+
+// Level Management
+max_support_levels = input.int(3, "Max Support Levels", minval=1, maxval=10, group="Level Management")
+max_resistance_levels = input.int(3, "Max Resistance Levels", minval=1, maxval=10, group="Level Management")
+
+// Visual Settings
+show_support = input.bool(true, "Show Support Levels", group="Visual Settings")
+show_resistance = input.bool(true, "Show Resistance Levels", group="Visual Settings")
+line_width = input.int(2, "Line Width", minval=1, maxval=4, group="Visual Settings")
+support_color = input.color(color.new(color.green, 0), "Support Color", group="Visual Settings")
+resistance_color = input.color(color.new(color.red, 0), "Resistance Color", group="Visual Settings")
+
+// ============================================================================
+// PIVOT DETECTION
+// ============================================================================
+// Detect pivot highs (potential resistance)
+pivotHigh = ta.pivothigh(high, pivot_length, pivot_length)
+
+// Detect pivot lows (potential support)
+pivotLow = ta.pivotlow(low, pivot_length, pivot_length)
+
+// ============================================================================
+// LEVEL STORAGE ARRAYS
+// ============================================================================
+var array<float> support_levels = array.new_float(0)
+var array<float> resistance_levels = array.new_float(0)
+var array<line> support_lines = array.new_line(0)
+var array<line> resistance_lines = array.new_line(0)
+
+// ============================================================================
+// ADD NEW LEVELS
+// ============================================================================
+// When a new pivot high is detected (resistance)
+if not na(pivotHigh) and show_resistance
+    // Check if this level is unique (not too close to existing levels)
+    is_unique = true
+    min_distance = close * 0.005  // 0.5% minimum distance
+    
+    if array.size(resistance_levels) > 0
+        for i = 0 to array.size(resistance_levels) - 1
+            if math.abs(pivotHigh - array.get(resistance_levels, i)) < min_distance
+                is_unique := false
+                break
+    
+    // Add new resistance level
+    if is_unique
+        array.push(resistance_levels, pivotHigh)
+        
+        // Create horizontal line
+        new_line = line.new(x1 = bar_index - pivot_length, y1 = pivotHigh, x2 = bar_index + 50, y2 = pivotHigh, color = resistance_color, width = line_width, extend = extend.right, style = line.style_solid)
+        array.push(resistance_lines, new_line)
+
+// When a new pivot low is detected (support)
+if not na(pivotLow) and show_support
+    // Check if this level is unique
+    is_unique = true
+    min_distance = close * 0.005  // 0.5% minimum distance
+    
+    if array.size(support_levels) > 0
+        for i = 0 to array.size(support_levels) - 1
+            if math.abs(pivotLow - array.get(support_levels, i)) < min_distance
+                is_unique := false
+                break
+    
+    // Add new support level
+    if is_unique
+        array.push(support_levels, pivotLow)
+        
+        // Create horizontal line
+        new_line = line.new(x1 = bar_index - pivot_length, y1 = pivotLow, x2 = bar_index + 50, y2 = pivotLow, color = support_color, width = line_width, extend = extend.right, style = line.style_solid)
+        array.push(support_lines, new_line)
+
+// ============================================================================
+// LEVEL MANAGEMENT (Keep only top N levels)
+// ============================================================================
+// Remove excess resistance levels (keep only the most recent)
+while array.size(resistance_levels) > max_resistance_levels
+    array.shift(resistance_levels)
+    old_line = array.shift(resistance_lines)
+    line.delete(old_line)
+
+// Remove excess support levels
+while array.size(support_levels) > max_support_levels
+    array.shift(support_levels)
+    old_line = array.shift(support_lines)
+    line.delete(old_line)
+
+// ============================================================================
+// UPDATE LINE POSITIONS (extend to current bar)
+// ============================================================================
+// Update resistance lines
+if array.size(resistance_lines) > 0
+    for i = 0 to array.size(resistance_lines) - 1
+        current_line = array.get(resistance_lines, i)
+        if not na(current_line)
+            line.set_x2(current_line, bar_index + 50)
+
+// Update support lines
+if array.size(support_lines) > 0
+    for i = 0 to array.size(support_lines) - 1
+        current_line = array.get(support_lines, i)
+        if not na(current_line)
+            line.set_x2(current_line, bar_index + 50)
+
+// ============================================================================
+// VISUAL MARKERS (Optional - show where pivots were detected)
+// ============================================================================
+// Mark pivot highs with small red triangle
+plotshape(not na(pivotHigh) and show_resistance, title="Resistance Pivot", style=shape.triangledown, location=location.abovebar, color=color.new(resistance_color, 50), size=size.tiny)
+
+// Mark pivot lows with small green triangle
+plotshape(not na(pivotLow) and show_support, title="Support Pivot", style=shape.triangleup, location=location.belowbar, color=color.new(support_color, 50), size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+// Alert when price approaches support
+support_touched = false
+if array.size(support_levels) > 0
+    for i = 0 to array.size(support_levels) - 1
+        level = array.get(support_levels, i)
+        if close <= level * 1.002 and close >= level * 0.998  // Within 0.2% of level
+            support_touched := true
+            break
+
+// Alert when price approaches resistance
+resistance_touched = false
+if array.size(resistance_levels) > 0
+    for i = 0 to array.size(resistance_levels) - 1
+        level = array.get(resistance_levels, i)
+        if close <= level * 1.002 and close >= level * 0.998  // Within 0.2% of level
+            resistance_touched := true
+            break
+
+alertcondition(support_touched, title="Price at Support", message="🟢 Price is touching a support level!")
+alertcondition(resistance_touched, title="Price at Resistance", message="🔴 Price is touching a resistance level!")

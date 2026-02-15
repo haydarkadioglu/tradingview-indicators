@@ -1,0 +1,283 @@
+//@version=5
+indicator("ML Decision Tree Classifier", overlay=true, shorttitle="ML DTree", max_bars_back=300)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// Trend Settings
+ema_short = input.int(20, "EMA Short", minval=5, maxval=50, group="Trend")
+ema_medium = input.int(50, "EMA Medium", minval=20, maxval=100, group="Trend")
+ema_long = input.int(200, "EMA Long", minval=50, maxval=300, group="Trend")
+
+// RSI Settings
+rsi_length = input.int(14, "RSI Length", minval=5, maxval=30, group="Momentum")
+rsi_oversold = input.int(30, "RSI Oversold", minval=20, maxval=40, group="Momentum")
+rsi_overbought = input.int(70, "RSI Overbought", minval=60, maxval=80, group="Momentum")
+
+// Volume Settings
+volume_threshold = input.float(1.2, "High Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Volume")
+
+// S/R Settings
+sr_distance = input.float(2.0, "S/R Distance %", minval=0.5, maxval=5.0, step=0.5, group="Support/Resistance")
+pivot_length = input.int(10, "Pivot Length", minval=5, maxval=20, group="Support/Resistance")
+
+// Display Settings
+show_decision_path = input.bool(true, "Show Decision Path Panel", group="Display")
+panel_position = input.string("Top Right", "Panel Position", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group="Display")
+show_signals = input.bool(true, "Show Buy/Sell Signals", group="Display")
+min_confidence = input.int(60, "Min Confidence for Signals (%)", minval=40, maxval=80, group="Display")
+
+// ============================================================================
+// FEATURE EXTRACTION - TREND
+// ============================================================================
+ema20 = ta.ema(close, ema_short)
+ema50 = ta.ema(close, ema_medium)
+ema200 = ta.ema(close, ema_long)
+
+is_uptrend = ema20 > ema50 and ema50 > ema200
+is_downtrend = ema20 < ema50 and ema50 < ema200
+is_ranging = not is_uptrend and not is_downtrend
+
+// Plot EMAs
+plot(ema20, "EMA 20", color=color.new(color.blue, 30), linewidth=1)
+plot(ema50, "EMA 50", color=color.new(color.orange, 30), linewidth=1)
+plot(ema200, "EMA 200", color=color.new(color.purple, 50), linewidth=1)
+
+// ============================================================================
+// FEATURE EXTRACTION - MOMENTUM
+// ============================================================================
+rsi = ta.rsi(close, rsi_length)
+is_oversold = rsi < rsi_oversold
+is_overbought = rsi > rsi_overbought
+is_neutral_rsi = rsi >= rsi_oversold and rsi <= rsi_overbought
+
+// ============================================================================
+// FEATURE EXTRACTION - VOLUME
+// ============================================================================
+avg_volume = ta.sma(volume, 20)
+volume_ratio = avg_volume > 0 ? volume / avg_volume : 1.0
+high_volume = volume_ratio > volume_threshold
+low_volume = volume_ratio < 0.8
+
+// ============================================================================
+// FEATURE EXTRACTION - MACD
+// ============================================================================
+[macd_line, signal_line, histogram] = ta.macd(close, 12, 26, 9)
+macd_bullish = histogram > 0 and histogram > histogram[1]
+macd_bearish = histogram < 0 and histogram < histogram[1]
+
+// ============================================================================
+// FEATURE EXTRACTION - SUPPORT/RESISTANCE
+// ============================================================================
+pivotHigh = ta.pivothigh(high, pivot_length, pivot_length)
+pivotLow = ta.pivotlow(low, pivot_length, pivot_length)
+
+// Find most recent resistance and support
+var float nearest_resistance = na
+var float nearest_support = na
+
+if not na(pivotHigh)
+    nearest_resistance := pivotHigh
+
+if not na(pivotLow)
+    nearest_support := pivotLow
+
+// Calculate distance to S/R
+dist_to_resistance = not na(nearest_resistance) and nearest_resistance > close ? ((nearest_resistance - close) / close) * 100 : 999.0
+dist_to_support = not na(nearest_support) and nearest_support < close ? ((close - nearest_support) / close) * 100 : 999.0
+
+near_resistance = dist_to_resistance < sr_distance and dist_to_resistance > 0
+near_support = dist_to_support < sr_distance and dist_to_support > 0
+
+// ============================================================================
+// DECISION TREE LOGIC
+// ============================================================================
+var string prediction = "SIDEWAYS"
+var float confidence = 50.0
+var string decision_path = ""
+
+// Level 1: Trend Classification
+if is_uptrend
+    // UPTREND PATH
+    base_confidence = 60.0
+    decision_path := "[+] Trend: UPTREND\n"
+    
+    // Level 2: RSI Check
+    if is_overbought
+        prediction := "SIDEWAYS"
+        confidence := 50.0
+        decision_path += "[!] RSI: Overbought (" + str.tostring(rsi, "#") + ")\n"
+        decision_path += "[X] Early Exit: Overbought"
+    else
+        if not is_neutral_rsi
+            base_confidence -= 10
+            decision_path += "[!] RSI: Edge (" + str.tostring(rsi, "#") + ")\n"
+        else
+            decision_path += "[+] RSI: Neutral (" + str.tostring(rsi, "#") + ")\n"
+        
+        // Level 3: Volume Check
+        if high_volume
+            base_confidence += 10
+            decision_path += "[+] Volume: High (" + str.tostring(volume_ratio, "#.#") + "x)\n"
+        else if low_volume
+            base_confidence -= 15
+            decision_path += "[!] Volume: Low (" + str.tostring(volume_ratio, "#.#") + "x)\n"
+            
+            if base_confidence < 50
+                prediction := "SIDEWAYS"
+                confidence := base_confidence
+                decision_path += "[X] Exit: Low Volume Weakness"
+        else
+            decision_path += "[-] Volume: Normal (" + str.tostring(volume_ratio, "#.#") + "x)\n"
+        
+        // Level 4: S/R Check
+        if prediction != "SIDEWAYS"
+            if near_resistance
+                prediction := "SIDEWAYS"
+                confidence := 55.0
+                decision_path += "[!] S/R: Near Resistance (" + str.tostring(dist_to_resistance, "#.#") + "%)\n"
+                decision_path += "[X] Exit: Resistance Barrier"
+            else
+                decision_path += "[+] S/R: Clear Path\n"
+                
+                // Level 5: MACD Confirmation
+                if macd_bullish
+                    base_confidence += 10
+                    decision_path += "[+] MACD: Bullish\n"
+                else if macd_bearish
+                    base_confidence -= 15
+                    decision_path += "[-] MACD: Bearish\n"
+                    
+                    if base_confidence < 50
+                        prediction := "SIDEWAYS"
+                        confidence := base_confidence
+                        decision_path += "[X] Exit: MACD Conflict"
+                else
+                    decision_path += "[-] MACD: Neutral\n"
+                
+                if prediction != "SIDEWAYS"
+                    prediction := "UP"
+                    confidence := math.min(base_confidence, 85.0)
+
+else if is_downtrend
+    // DOWNTREND PATH
+    base_confidence = 60.0
+    decision_path := "[-] Trend: DOWNTREND\n"
+    
+    // Level 2: RSI Check
+    if is_oversold
+        prediction := "SIDEWAYS"
+        confidence := 50.0
+        decision_path += "[!] RSI: Oversold (" + str.tostring(rsi, "#") + ")\n"
+        decision_path += "[X] Early Exit: Oversold (Reversal?)"
+    else
+        if not is_neutral_rsi
+            base_confidence -= 10
+            decision_path += "[!] RSI: Edge (" + str.tostring(rsi, "#") + ")\n"
+        else
+            decision_path += "[+] RSI: Neutral (" + str.tostring(rsi, "#") + ")\n"
+        
+        // Level 3: Volume Check
+        if high_volume
+            base_confidence += 10
+            decision_path += "[+] Volume: High (" + str.tostring(volume_ratio, "#.#") + "x)\n"
+        else if low_volume
+            base_confidence -= 15
+            decision_path += "[!] Volume: Low (" + str.tostring(volume_ratio, "#.#") + "x)\n"
+            
+            if base_confidence < 50
+                prediction := "SIDEWAYS"
+                confidence := base_confidence
+                decision_path += "[X] Exit: Low Volume Weakness"
+        else
+            decision_path += "[-] Volume: Normal (" + str.tostring(volume_ratio, "#.#") + "x)\n"
+        
+        // Level 4: S/R Check
+        if prediction != "SIDEWAYS"
+            if near_support
+                prediction := "SIDEWAYS"
+                confidence := 55.0
+                decision_path += "[!] S/R: Near Support (" + str.tostring(dist_to_support, "#.#") + "%)\n"
+                decision_path += "[X] Exit: Support Floor"
+            else
+                decision_path += "[+] S/R: Clear Path\n"
+                
+                // Level 5: MACD Confirmation
+                if macd_bearish
+                    base_confidence += 10
+                    decision_path += "[+] MACD: Bearish\n"
+                else if macd_bullish
+                    base_confidence -= 15
+                    decision_path += "[-] MACD: Bullish\n"
+                    
+                    if base_confidence < 50
+                        prediction := "SIDEWAYS"
+                        confidence := base_confidence
+                        decision_path += "[X] Exit: MACD Conflict"
+                else
+                    decision_path += "[-] MACD: Neutral\n"
+                
+                if prediction != "SIDEWAYS"
+                    prediction := "DOWN"
+                    confidence := math.min(base_confidence, 85.0)
+
+else
+    // RANGING MARKET PATH
+    decision_path := "[~] Trend: RANGING\n"
+    decision_path += "RSI: " + str.tostring(rsi, "#") + "\n"
+    decision_path += "Volume: " + str.tostring(volume_ratio, "#.#") + "x\n"
+    
+    // Check for potential breakout
+    if high_volume and macd_bullish and not near_resistance
+        prediction := "UP"
+        confidence := 50.0
+        decision_path += "[^] Potential Breakout UP"
+    else if high_volume and macd_bearish and not near_support
+        prediction := "DOWN"
+        confidence := 50.0
+        decision_path += "[v] Potential Breakdown DOWN"
+    else
+        prediction := "SIDEWAYS"
+        confidence := 70.0
+        decision_path += "[=] Stay Sideways"
+
+// ============================================================================
+// VISUALIZATION - DECISION PATH PANEL
+// ============================================================================
+if show_decision_path
+    // Convert position string to position constant
+    panel_pos = panel_position == "Top Left" ? position.top_left : panel_position == "Top Center" ? position.top_center : panel_position == "Top Right" ? position.top_right : panel_position == "Middle Left" ? position.middle_left : panel_position == "Middle Center" ? position.middle_center : panel_position == "Middle Right" ? position.middle_right : panel_position == "Bottom Left" ? position.bottom_left : panel_position == "Bottom Center" ? position.bottom_center : position.bottom_right
+    
+    var table decision_table = table.new(panel_pos, 1, 3, border_width=2)
+    
+    // Header
+    header_color = prediction == "UP" ? color.new(color.green, 20) : prediction == "DOWN" ? color.new(color.red, 20) : color.new(color.gray, 60)
+    table.cell(decision_table, 0, 0, "DECISION TREE", bgcolor=header_color, text_color=color.white, text_size=size.normal, text_font_family=font.family_monospace)
+    
+    // Decision Path
+    table.cell(decision_table, 0, 1, decision_path, bgcolor=color.new(color.gray, 90), text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    
+    // Prediction Result
+    pred_color = prediction == "UP" ? color.lime : prediction == "DOWN" ? color.red : color.orange
+    result_text = "PREDICTION: " + prediction + "\nConfidence: " + str.tostring(confidence, "#") + "%"
+    table.cell(decision_table, 0, 2, result_text, bgcolor=color.new(color.gray, 80), text_color=pred_color, text_size=size.normal)
+
+// ============================================================================
+// BUY/SELL SIGNALS
+// ============================================================================
+buy_signal = show_signals and prediction == "UP" and confidence >= min_confidence
+sell_signal = show_signals and prediction == "DOWN" and confidence >= min_confidence
+
+plotshape(buy_signal, title="BUY Signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.normal, text="BUY")
+plotshape(sell_signal, title="SELL Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.normal, text="SELL")
+
+// Background colors
+bgcolor(prediction == "UP" and confidence > 65 ? color.new(color.green, 95) : na, title="Bullish BG")
+bgcolor(prediction == "DOWN" and confidence > 65 ? color.new(color.red, 95) : na, title="Bearish BG")
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(buy_signal, title="Decision Tree BUY", message="Decision Tree: BUY Signal detected!")
+alertcondition(sell_signal, title="Decision Tree SELL", message="Decision Tree: SELL Signal detected!")
+alertcondition(confidence > 80, title="High Confidence Alert", message="Very high confidence prediction detected")

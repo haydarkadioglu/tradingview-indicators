@@ -1,0 +1,67 @@
+//@version=5
+indicator("Buy/Sell Signals - Multi-Condition", overlay=true, shorttitle="B/S Signals")
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// RSI Settings
+rsi_length = input.int(14, "RSI Length", minval=1, group="RSI Settings")
+rsi_oversold = input.int(40, "RSI Oversold Level", minval=0, maxval=50, group="RSI Settings", tooltip="Raised to 40 for more signals")
+rsi_overbought = input.int(60, "RSI Overbought Level", minval=50, maxval=100, group="RSI Settings", tooltip="Lowered to 60 for more signals")
+
+// EMA Settings
+ema_fast = input.int(20, "Fast EMA Period", minval=1, group="EMA Settings")
+ema_slow = input.int(50, "Slow EMA Period", minval=1, group="EMA Settings")
+show_emas = input.bool(true, "Show EMA Lines", group="EMA Settings")
+
+// Visual Settings
+show_buy_labels = input.bool(true, "Show Buy Labels", group="Visual Settings")
+show_sell_labels = input.bool(true, "Show Sell Labels", group="Visual Settings")
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+// RSI Calculation
+rsi = ta.rsi(close, rsi_length)
+
+// EMA Calculations
+ema20 = ta.ema(close, ema_fast)
+ema50 = ta.ema(close, ema_slow)
+
+// ============================================================================
+// SIMPLIFIED BUY/SELL SIGNAL CONDITIONS
+// ============================================================================
+// Buy Signal: RSI is low AND price is crossing up OR already above EMA
+buySignal = rsi < rsi_oversold and close > ema20 and ema20 > ema50
+
+// Sell Signal: RSI is high AND price is crossing down OR already below EMA
+sellSignal = rsi > rsi_overbought and close < ema20 and ema20 < ema50
+
+// ============================================================================
+// VISUAL PLOTTING
+// ============================================================================
+// Plot Buy Signals (green arrow below candle)
+plotshape(show_buy_labels and buySignal, title="BUY Signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.normal, text="BUY")
+
+// Plot Sell Signals (red arrow above candle)
+plotshape(show_sell_labels and sellSignal, title="SELL Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.normal, text="SELL")
+
+// Plot EMA Lines (optional)
+plot(show_emas ? ema20 : na, "EMA 20", color=color.new(color.blue, 0), linewidth=2)
+plot(show_emas ? ema50 : na, "EMA 50", color=color.new(color.orange, 0), linewidth=2)
+
+// ============================================================================
+// BACKGROUND COLORS (Optional - shows market conditions)
+// ============================================================================
+// Light green background when in potential buy zone
+bgcolor(rsi < rsi_oversold ? color.new(color.green, 95) : na, title="Oversold Zone")
+
+// Light red background when in potential sell zone
+bgcolor(rsi > rsi_overbought ? color.new(color.red, 95) : na, title="Overbought Zone")
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(buySignal, title="Buy Signal Alert", message="🟢 BUY SIGNAL DETECTED! RSI Oversold + Uptrend")
+alertcondition(sellSignal, title="Sell Signal Alert", message="🔴 SELL SIGNAL DETECTED! RSI Overbought + Downtrend")
+alertcondition(buySignal or sellSignal, title="Any Signal Alert", message="⚡ Trading Signal Detected! Check chart for details.")

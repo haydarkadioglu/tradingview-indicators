@@ -1,0 +1,389 @@
+//@version=5
+indicator("Ensemble ML Predictor", overlay=true, shorttitle="ML Ensemble", max_bars_back=500)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// Ensemble Weights (Optimized for Crypto)
+knn_weight = input.float(0.45, "KNN Weight", minval=0.0, maxval=1.0, step=0.05, group="Ensemble", tooltip="Pattern matching works best in crypto (higher weight)")
+linreg_weight = input.float(0.25, "LinReg Weight", minval=0.0, maxval=1.0, step=0.05, group="Ensemble", tooltip="Trend less stable in volatile markets (lower weight)")
+dtree_weight = input.float(0.30, "DTree Weight", minval=0.0, maxval=1.0, step=0.05, group="Ensemble", tooltip="Rule-based validation (balanced weight)")
+min_consensus = input.int(65, "Min Consensus %", minval=40, maxval=90, step=5, group="Ensemble", tooltip="Higher threshold = fewer but better signals")
+
+// KNN Settings (Optimized)
+knn_k = input.int(12, "K Neighbors", minval=5, maxval=20, group="KNN", tooltip="More neighbors = smoother predictions")
+knn_lookback = input.int(300, "Lookback Bars", minval=100, maxval=500, group="KNN", tooltip="Larger history for better pattern matching")
+
+// Linear Regression Settings (Optimized for responsiveness)
+linreg_period = input.int(15, "Regression Period", minval=10, maxval=50, group="Linear Regression", tooltip="Shorter period = more responsive to changes")
+linreg_projection = input.int(4, "Projection Bars", minval=3, maxval=10, group="Linear Regression", tooltip="Shorter projection for volatile markets")
+
+// Decision Tree Settings (Standard EMAs)
+ema_short = input.int(20, "EMA Short", minval=5, maxval=50, group="Decision Tree", tooltip="Fast trend")
+ema_medium = input.int(50, "EMA Medium", minval=20, maxval=100, group="Decision Tree", tooltip="Medium trend")
+ema_long = input.int(200, "EMA Long", minval=50, maxval=300, group="Decision Tree", tooltip="Long-term trend")
+
+// Display Settings
+show_individual_panels = input.bool(false, "Show Individual Algorithm Panels", group="Display")
+show_consensus_bar = input.bool(true, "Show Consensus Bar", group="Display")
+panel_position = input.string("Top Right", "Panel Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Display")
+
+// ============================================================================
+// ALGORITHM 1: KNN PATTERN MATCHING
+// ============================================================================
+// Feature extraction
+f_rsi = ta.rsi(close, 14)
+f_volume_ratio = volume / ta.sma(volume, 20)
+f_price_change = (close - close[10]) / close[10] * 100
+f_price_position = (close - ta.lowest(low, 50)) / (ta.highest(high, 50) - ta.lowest(low, 50))
+
+// Normalize features to 0-1 range
+normalize(value, min_val, max_val) =>
+    if max_val - min_val != 0
+        (value - min_val) / (max_val - min_val)
+    else
+        0.5
+
+// Calculate distance between current state and historical state
+calculate_distance(hist_rsi, hist_vol, hist_change, hist_pos) =>
+    dist_rsi = math.pow(normalize(f_rsi, 0, 100) - normalize(hist_rsi, 0, 100), 2)
+    dist_vol = math.pow(normalize(f_volume_ratio, 0, 3) - normalize(hist_vol, 0, 3), 2)
+    dist_change = math.pow(normalize(f_price_change, -10, 10) - normalize(hist_change, -10, 10), 2)
+    dist_pos = math.pow(f_price_position - hist_pos, 2)
+    math.sqrt(dist_rsi + dist_vol + dist_change + dist_pos)
+
+// Find K nearest neighbors and predict
+var float knn_conf = 50.0
+var string knn_pred = "SIDEWAYS"
+
+if barstate.islast
+    // Arrays to store distances and outcomes
+    var array<float> distances = array.new_float(0)
+    var array<float> outcomes = array.new_float(0)
+    array.clear(distances)
+    array.clear(outcomes)
+    
+    // Search through historical data
+    max_lookback = math.min(knn_lookback, bar_index)
+    for i = 10 to max_lookback
+        hist_rsi = ta.rsi(close[i], 14)
+        hist_vol = volume[i] / ta.sma(volume[i], 20)
+        hist_change = (close[i] - close[i + 10]) / close[i + 10] * 100
+        hist_pos = (close[i] - ta.lowest(low[i], 50)) / (ta.highest(high[i], 50) - ta.lowest(low[i], 50))
+        
+        distance = calculate_distance(hist_rsi, hist_vol, hist_change, hist_pos)
+        
+        // What happened 5 bars after this state?
+        if i > 5
+            outcome = (close[i - 5] - close[i]) / close[i] * 100
+            array.push(distances, distance)
+            array.push(outcomes, outcome)
+    
+    // Sort by distance and take K nearest
+    if array.size(distances) >= knn_k
+        // Simple bubble sort for k smallest
+        for j = 0 to knn_k - 1
+            for m = j + 1 to array.size(distances) - 1
+                if array.get(distances, m) < array.get(distances, j)
+                    // Swap distances
+                    temp_dist = array.get(distances, j)
+                    array.set(distances, j, array.get(distances, m))
+                    array.set(distances, m, temp_dist)
+                    // Swap outcomes
+                    temp_out = array.get(outcomes, j)
+                    array.set(outcomes, j, array.get(outcomes, m))
+                    array.set(outcomes, m, temp_out)
+        
+        // Average outcome of K nearest neighbors
+        sum_outcome = 0.0
+        for k = 0 to knn_k - 1
+            sum_outcome += array.get(outcomes, k)
+        avg_outcome = sum_outcome / knn_k
+        
+        // Classify
+        if avg_outcome > 1.0
+            knn_pred := "UP"
+            knn_conf := math.min(avg_outcome * 20, 85)
+        else if avg_outcome < -1.0
+            knn_pred := "DOWN"
+            knn_conf := math.min(math.abs(avg_outcome) * 20, 85)
+        else
+            knn_pred := "SIDEWAYS"
+            knn_conf := 60.0
+
+// ============================================================================
+// ALGORITHM 2: LINEAR REGRESSION
+// ============================================================================
+// Calculate linear regression slope and projection
+slope = (ta.linreg(close, linreg_period, 0) - ta.linreg(close, linreg_period, 1))
+intercept = ta.linreg(close, linreg_period, 0) - slope * (linreg_period - 1) / 2
+
+// Project future price
+projected_price = intercept + slope * (linreg_period + linreg_projection)
+price_change_pct = ((projected_price - close) / close) * 100
+
+// Classify based on projection
+var string linreg_pred = "SIDEWAYS"
+var float linreg_conf = 50.0
+
+if price_change_pct > 1.0
+    linreg_pred := "UP"
+    linreg_conf := math.min(math.abs(price_change_pct) * 15, 85)
+else if price_change_pct < -1.0
+    linreg_pred := "DOWN"
+    linreg_conf := math.min(math.abs(price_change_pct) * 15, 85)
+else
+    linreg_pred := "SIDEWAYS"
+    linreg_conf := 65.0
+
+// Plot regression line
+plot(ta.linreg(close, linreg_period, 0), "LinReg", color=color.new(color.yellow, 50), linewidth=2)
+
+// ============================================================================
+// ALGORITHM 3: DECISION TREE (SIMPLIFIED)
+// ============================================================================
+ema20 = ta.ema(close, ema_short)
+ema50 = ta.ema(close, ema_medium)
+ema200 = ta.ema(close, ema_long)
+
+is_uptrend = ema20 > ema50 and ema50 > ema200
+is_downtrend = ema20 < ema50 and ema50 < ema200
+
+rsi = ta.rsi(close, 14)
+is_overbought = rsi > 70
+is_oversold = rsi < 30
+is_neutral = rsi >= 30 and rsi <= 70
+
+volume_ratio = volume / ta.sma(volume, 20)
+high_volume = volume_ratio > 1.2
+
+var string dtree_pred = "SIDEWAYS"
+var float dtree_conf = 50.0
+
+if is_uptrend
+    if is_overbought
+        dtree_pred := "SIDEWAYS"
+        dtree_conf := 55.0
+    else if is_neutral and high_volume
+        dtree_pred := "UP"
+        dtree_conf := 75.0
+    else
+        dtree_pred := "UP"
+        dtree_conf := 60.0
+else if is_downtrend
+    if is_oversold
+        dtree_pred := "SIDEWAYS"
+        dtree_conf := 55.0
+    else if is_neutral and high_volume
+        dtree_pred := "DOWN"
+        dtree_conf := 75.0
+    else
+        dtree_pred := "DOWN"
+        dtree_conf := 60.0
+else
+    dtree_pred := "SIDEWAYS"
+    dtree_conf := 70.0
+
+// Plot EMAs
+plot(ema20, "EMA 20", color=color.new(color.blue, 50), linewidth=1)
+plot(ema50, "EMA 50", color=color.new(color.orange, 50), linewidth=1)
+plot(ema200, "EMA 200", color=color.new(color.purple, 70), linewidth=1)
+
+// ============================================================================
+// ADVANCED FILTERS (Quality Control - BALANCED)
+// ============================================================================
+// Support/Resistance Detection (relaxed range)
+resistance = ta.highest(high, 20)
+support = ta.lowest(low, 20)
+dist_to_resistance = ((resistance - close) / close) * 100
+dist_to_support = ((close - support) / close) * 100
+near_resistance = dist_to_resistance < 2.5  // Within 2.5% (was 1.5%)
+near_support = dist_to_support < 2.5  // Within 2.5%
+
+// RSI Safety Zones (relaxed)
+rsi_safe_for_buy = rsi < 70  // Not extreme overbought
+rsi_safe_for_sell = rsi > 30  // Not extreme oversold
+
+// Volume/Trend Confirmation (at least one should be true)
+volume_strength = volume_ratio > 1.2  // Lower threshold
+trend_strength = math.abs(ema20 - ema50) / ema50 * 100
+strong_trend = trend_strength > 1.5  // Lower threshold (was 2.0%)
+
+// Price momentum (optional boost)
+price_momentum = (close - close[3]) / close[3] * 100
+
+// ============================================================================
+// ENSEMBLE VOTING & CONSENSUS
+// ============================================================================
+// Calculate weighted scores for each direction
+score_up = 0.0
+score_down = 0.0
+score_sideways = 0.0
+
+// KNN vote
+if knn_pred == "UP"
+    score_up += knn_conf * knn_weight
+else if knn_pred == "DOWN"
+    score_down += knn_conf * knn_weight
+else
+    score_sideways += knn_conf * knn_weight
+
+// LinReg vote
+if linreg_pred == "UP"
+    score_up += linreg_conf * linreg_weight
+else if linreg_pred == "DOWN"
+    score_down += linreg_conf * linreg_weight
+else
+    score_sideways += linreg_conf * linreg_weight
+
+// DTree vote
+if dtree_pred == "UP"
+    score_up += dtree_conf * dtree_weight
+else if dtree_pred == "DOWN"
+    score_down += dtree_conf * dtree_weight
+else
+    score_sideways += dtree_conf * dtree_weight
+
+// Normalize scores to percentages
+total_score = score_up + score_down + score_sideways
+score_up_pct = total_score > 0 ? (score_up / total_score) * 100 : 0
+score_down_pct = total_score > 0 ? (score_down / total_score) * 100 : 0
+score_sideways_pct = total_score > 0 ? (score_sideways / total_score) * 100 : 0
+
+// Determine winner
+var string ensemble_pred = "SIDEWAYS"
+var float ensemble_conf = 50.0
+
+if score_up_pct >= score_down_pct and score_up_pct >= score_sideways_pct
+    ensemble_pred := "UP"
+    ensemble_conf := score_up_pct
+else if score_down_pct >= score_sideways_pct
+    ensemble_pred := "DOWN"
+    ensemble_conf := score_down_pct
+else
+    ensemble_pred := "SIDEWAYS"
+    ensemble_conf := score_sideways_pct
+
+// Calculate consensus (how much algorithms agree)
+consensus_score = math.max(score_up_pct, score_down_pct, score_sideways_pct)
+
+// ============================================================================
+// VISUALIZATION - MAIN ENSEMBLE PANEL
+// ============================================================================
+if barstate.islast
+    panel_pos = panel_position == "Top Left" ? position.top_left : panel_position == "Top Right" ? position.top_right : panel_position == "Bottom Left" ? position.bottom_left : position.bottom_right
+    
+    var table ensemble_table = table.new(panel_pos, 1, 6, border_width=2)
+    
+    // Header
+    header_color = ensemble_pred == "UP" ? color.new(color.green, 20) : ensemble_pred == "DOWN" ? color.new(color.red, 20) : color.new(color.gray, 60)
+    table.cell(ensemble_table, 0, 0, "ENSEMBLE ML PREDICTOR", bgcolor=header_color, text_color=color.white, text_size=size.normal, text_font_family=font.family_monospace)
+    
+    // Prediction
+    pred_text = "PREDICTION: " + ensemble_pred
+    pred_color = ensemble_pred == "UP" ? color.lime : ensemble_pred == "DOWN" ? color.red : color.orange
+    table.cell(ensemble_table, 0, 1, pred_text, bgcolor=color.new(color.gray, 90), text_color=pred_color, text_size=size.large)
+    
+    // Confidence
+    conf_text = "Confidence: " + str.tostring(ensemble_conf, "#.#") + "%"
+    conf_color = ensemble_conf > 70 ? color.lime : ensemble_conf > 50 ? color.orange : color.red
+    table.cell(ensemble_table, 0, 2, conf_text, bgcolor=color.new(color.gray, 90), text_color=conf_color, text_size=size.normal)
+    
+    // Consensus
+    consensus_text = "Consensus: " + str.tostring(consensus_score, "#.#") + "%"
+    consensus_label = consensus_score > 70 ? " (Strong)" : consensus_score > 50 ? " (Moderate)" : " (Weak)"
+    consensus_color = consensus_score > 70 ? color.lime : consensus_score > 50 ? color.yellow : color.red
+    table.cell(ensemble_table, 0, 3, consensus_text + consensus_label, bgcolor=color.new(color.gray, 90), text_color=consensus_color, text_size=size.normal)
+    
+    // Consensus Bar
+    if show_consensus_bar
+        bar_length = math.floor(consensus_score / 5)  // 0-20 bars
+        bar_str = ""
+        for i = 0 to 19
+            bar_str += i < bar_length ? "█" : "░"
+        table.cell(ensemble_table, 0, 4, bar_str, bgcolor=color.new(color.gray, 95), text_color=consensus_color, text_size=size.small, text_font_family=font.family_monospace)
+    
+    // Individual Votes (with color coding)
+    votes_text = "Algorithm Votes:\n"
+    
+    // Build vote text with status indicators
+    knn_status = knn_pred == ensemble_pred ? "[+]" : knn_pred == "SIDEWAYS" ? "[~]" : "[-]"
+    linreg_status = linreg_pred == ensemble_pred ? "[+]" : linreg_pred == "SIDEWAYS" ? "[~]" : "[-]"
+    dtree_status = dtree_pred == ensemble_pred ? "[+]" : dtree_pred == "SIDEWAYS" ? "[~]" : "[-]"
+    
+    votes_text += knn_status + " KNN:    " + knn_pred + " (" + str.tostring(knn_conf, "#") + "%) [45%]\n"
+    votes_text += linreg_status + " LinReg: " + linreg_pred + " (" + str.tostring(linreg_conf, "#") + "%) [25%]\n"
+    votes_text += dtree_status + " DTree:  " + dtree_pred + " (" + str.tostring(dtree_conf, "#") + "%) [30%]"
+    
+    table.cell(ensemble_table, 0, 5, votes_text, bgcolor=color.new(color.gray, 90), text_color=color.white, text_size=size.small, text_halign=text.align_left, text_font_family=font.family_monospace)
+
+// ============================================================================
+// BUY/SELL SIGNALS (Balanced Quality + Frequency)
+// ============================================================================
+// Track last signal state to detect changes
+var int last_signal = 0  // 0 = none/sideways, 1 = buy, -1 = sell
+
+// Determine current signal with BALANCED FILTERS
+current_signal = 0
+
+// BUY Signal Criteria
+if ensemble_pred == "UP" and ensemble_conf >= min_consensus and consensus_score >= 65
+    // Quality checks (not all required, but improve accuracy)
+    quality_score = 0
+    
+    if not near_resistance
+        quality_score += 3  // Important
+    if rsi_safe_for_buy
+        quality_score += 2  // Important
+    if volume_strength
+        quality_score += 2  // Good to have
+    if strong_trend
+        quality_score += 2  // Good to have
+    if price_momentum > 0
+        quality_score += 1  // Nice to have
+    
+    // Need at least 5 points to signal (out of 10)
+    if quality_score >= 5
+        current_signal := 1
+
+// SELL Signal Criteria
+else if ensemble_pred == "DOWN" and ensemble_conf >= min_consensus and consensus_score >= 65
+    // Quality checks
+    quality_score = 0
+    
+    if not near_support
+        quality_score += 3  // Important
+    if rsi_safe_for_sell
+        quality_score += 2  // Important
+    if volume_strength
+        quality_score += 2  // Good to have
+    if strong_trend
+        quality_score += 2  // Good to have
+    if price_momentum < 0
+        quality_score += 1  // Nice to have
+    
+    // Need at least 5 points to signal (out of 10)
+    if quality_score >= 5
+        current_signal := -1
+
+// Only show signal when it CHANGES (new signal)
+buy_signal = current_signal == 1 and last_signal != 1
+sell_signal = current_signal == -1 and last_signal != -1
+
+// Update state for next bar
+if current_signal != 0
+    last_signal := current_signal
+
+plotshape(buy_signal, title="BUY", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.large, text="BUY")
+plotshape(sell_signal, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.large, text="SELL")
+
+// Background color
+bgcolor(ensemble_pred == "UP" and consensus_score > 70 ? color.new(color.green, 95) : na, title="Bullish BG")
+bgcolor(ensemble_pred == "DOWN" and consensus_score > 70 ? color.new(color.red, 95) : na, title="Bearish BG")
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(buy_signal, title="Ensemble BUY", message="Ensemble ML: BUY Signal (High Consensus)")
+alertcondition(sell_signal, title="Ensemble SELL", message="Ensemble ML: SELL Signal (High Consensus)")
+alertcondition(consensus_score > 80, title="Very High Consensus", message="Ensemble ML: Very high agreement between algorithms")
