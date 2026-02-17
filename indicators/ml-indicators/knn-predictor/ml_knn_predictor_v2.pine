@@ -1,0 +1,624 @@
+//@version=5
+indicator("ML KNN Predictor V2 [Enhanced]", overlay=true, shorttitle="KNN V2", max_bars_back=500)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+// Prediction Settings
+lookback_bars = input.int(100, "Historical Lookback Bars", minval=50, maxval=300, group="Prediction")
+k_neighbors = input.int(12, "K Nearest Neighbors", minval=5, maxval=25, group="Prediction", tooltip="More neighbors = smoother predictions")
+prediction_horizon = input.int(10, "Predict N Bars Ahead", minval=5, maxval=30, group="Prediction")
+
+// FVG Settings
+fvg_enabled = input.bool(true, "Enable FVG Detection", group="Fair Value Gap (FVG)", tooltip="Detect price gaps for prediction")
+fvg_min_size = input.float(0.1, "Min FVG Size %", minval=0.05, maxval=2.0, step=0.05, group="Fair Value Gap (FVG)")
+fvg_lookback = input.int(50, "FVG Lookback", minval=20, maxval=200, group="Fair Value Gap (FVG)")
+show_fvg_boxes = input.bool(true, "Show FVG Boxes", group="Fair Value Gap (FVG)")
+
+// S/R Settings
+sr_enabled = input.bool(true, "Enable S/R Detection", group="Support/Resistance")
+sr_swing_length = input.int(5, "Swing Length", minval=3, maxval=20, group="Support/Resistance")
+sr_max_levels = input.int(5, "Max S/R Levels", minval=3, maxval=10, group="Support/Resistance")
+show_sr_lines = input.bool(true, "Show S/R Lines", group="Support/Resistance")
+
+// Volume Settings
+vol_enabled = input.bool(true, "Enable Volume Analysis", group="Volume")
+vol_period = input.int(20, "Volume SMA Period", minval=10, maxval=50, group="Volume")
+vol_threshold = input.float(1.5, "High Volume Threshold", minval=1.0, maxval=3.0, step=0.1, group="Volume")
+
+// Feature Weights (Total should be ~1.0)
+weight_price = input.float(0.12, "Price Position Weight", minval=0.0, maxval=0.3, step=0.01, group="Feature Weights")
+weight_trend = input.float(0.12, "Trend Weight", minval=0.0, maxval=0.3, step=0.01, group="Feature Weights")
+weight_rsi = input.float(0.08, "RSI Weight", minval=0.0, maxval=0.3, step=0.01, group="Feature Weights")
+weight_volatility = input.float(0.08, "Volatility Weight", minval=0.0, maxval=0.3, step=0.01, group="Feature Weights")
+weight_fvg = input.float(0.20, "FVG Weight", minval=0.0, maxval=0.4, step=0.01, group="Feature Weights", tooltip="High importance!")
+weight_sr = input.float(0.15, "S/R Weight", minval=0.0, maxval=0.3, step=0.01, group="Feature Weights")
+weight_volume = input.float(0.15, "Volume Weight", minval=0.0, maxval=0.3, step=0.01, group="Feature Weights")
+
+// Display Settings
+show_prediction_panel = input.bool(true, "Show Prediction Panel", group="Display")
+panel_position = input.string("Top Right", "Panel Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Display")
+show_target_line = input.bool(true, "Show Target Line", group="Display")
+show_signals = input.bool(true, "Show Buy/Sell Signals", group="Display")
+min_confidence = input.int(60, "Min Confidence for Signals (%)", minval=40, maxval=85, group="Display")
+
+// ============================================================================
+// FVG (FAIR VALUE GAP) DETECTION
+// ============================================================================
+// Detect bullish and bearish FVGs
+detect_fvg() =>
+    // Bullish FVG: Current low > Previous candle 2's high (gap up)
+    bull_fvg = low[0] > high[2]
+    bull_top = low[0]
+    bull_bottom = high[2]
+    bull_size = bull_fvg ? ((bull_top - bull_bottom) / bull_bottom) * 100 : 0.0
+    
+    //Bearish FVG: Current high < Previous candle 2's low (gap down)
+    bear_fvg = high[0] < low[2]
+    bear_top = low[2]
+    bear_bottom = high[0]
+    bear_size = bear_fvg ? ((bear_top - bear_bottom) / bear_top) * 100 : 0.0
+    
+    // Filter by minimum size
+    bull_valid = bull_fvg and bull_size >= fvg_min_size
+    bear_valid = bear_fvg and bear_size >= fvg_min_size
+    
+    [bull_valid, bull_top, bull_bottom, bear_valid, bear_top, bear_bottom]
+
+// Calculate distance to nearest FVG with array storage
+var array<float> fvg_bull_tops = array.new_float(0)
+var array<float> fvg_bull_bottoms = array.new_float(0)
+var array<float> fvg_bear_tops = array.new_float(0)
+var array<float> fvg_bear_bottoms = array.new_float(0)
+var array<int> fvg_bull_bars = array.new_int(0)
+var array<int> fvg_bear_bars = array.new_int(0)
+
+calc_fvg_proximity() =>
+    // Detect current bar FVG
+    [bull_valid, bull_top, bull_bottom, bear_valid, bear_top, bear_bottom] = detect_fvg()
+    
+    // Store new FVGs
+    if bull_valid and fvg_enabled
+        array.push(fvg_bull_tops, bull_top)
+        array.push(fvg_bull_bottoms, bull_bottom)
+        array.push(fvg_bull_bars, bar_index)
+        
+        // Keep only recent FVGs
+        if array.size(fvg_bull_tops) > 50
+            array.shift(fvg_bull_tops)
+            array.shift(fvg_bull_bottoms)
+            array.shift(fvg_bull_bars)
+    
+    if bear_valid and fvg_enabled
+        array.push(fvg_bear_tops, bear_top)
+        array.push(fvg_bear_bottoms, bear_bottom)
+        array.push(fvg_bear_bars, bar_index)
+        
+        if array.size(fvg_bear_tops) > 50
+            array.shift(fvg_bear_tops)
+            array.shift(fvg_bear_bottoms)
+            array.shift(fvg_bear_bars)
+    
+    // Find nearest FVG
+    min_dist_bull = 999999.0
+    min_dist_bear = 999999.0
+    fvg_bias = 0.0
+    
+    if fvg_enabled and array.size(fvg_bull_tops) > 0
+        // Check bullish FVGs
+        for i = 0 to array.size(fvg_bull_tops) - 1
+            b_top = array.get(fvg_bull_tops, i)
+            b_bot = array.get(fvg_bull_bottoms, i)
+            fvg_mid = (b_top + b_bot) / 2
+            dist = math.abs(close - fvg_mid) / close * 100
+            
+            if dist < min_dist_bull
+                min_dist_bull := dist
+                
+                // Bias calculation
+                if close < b_bot
+                    fvg_bias := 1.0  // Below gap = bullish
+                else if close > b_top
+                    fvg_bias := 0.5  // Above gap = filled
+    
+    if fvg_enabled and array.size(fvg_bear_tops) > 0
+        // Check bearish FVGs
+        for i = 0 to array.size(fvg_bear_tops) - 1
+            be_top = array.get(fvg_bear_tops, i)
+            be_bot = array.get(fvg_bear_bottoms, i)
+            fvg_mid = (be_top + be_bot) / 2
+            dist = math.abs(close - fvg_mid) / close * 100
+            
+            if dist < min_dist_bear
+                min_dist_bear := dist
+                
+                if close > be_top
+                    fvg_bias := -1.0  // Above gap = bearish
+                else if close < be_bot
+                    fvg_bias := -0.5  // Below gap = filled
+    
+    nearest_fvg_dist = math.min(min_dist_bull, min_dist_bear)
+    [nearest_fvg_dist, fvg_bias]
+
+// ============================================================================
+// SUPPORT/RESISTANCE DETECTION
+// ============================================================================
+// Detect swing highs and lows
+detect_swing() =>
+    swing_high = ta.pivothigh(high, sr_swing_length, sr_swing_length)
+    swing_low = ta.pivotlow(low, sr_swing_length, sr_swing_length)
+    
+    [swing_high, swing_low]
+
+// Calculate distance to nearest S/R level
+calc_sr_proximity() =>
+    var float[] sr_levels = array.new_float(0)
+    var int[] sr_touches = array.new_int(0)
+    
+    // Detect and store S/R levels
+    [s_high, s_low] = detect_swing()
+    
+    if not na(s_high) or not na(s_low)
+        level = not na(s_high) ? s_high : s_low
+        
+        // Add new level or strengthen existing
+        found = false
+        if array.size(sr_levels) > 0
+            for i = 0 to array.size(sr_levels) - 1
+                existing_level = array.get(sr_levels, i)
+                // If within 0.5% of existing level, increase touch count
+                if math.abs(level - existing_level) / existing_level < 0.005
+                    array.set(sr_touches, i, array.get(sr_touches, i) + 1)
+                    found := true
+                    break
+        
+        // Add new level if not found
+        if not found and array.size(sr_levels) < sr_max_levels
+            array.push(sr_levels, level)
+            array.push(sr_touches, 1)
+    
+    // Find nearest S/R and calculate strength
+    min_dist = 999999.0
+    sr_strength = 0
+    
+    if array.size(sr_levels) > 0
+        for i = 0 to array.size(sr_levels) - 1
+            level = array.get(sr_levels, i)
+            dist = math.abs(close - level) / close * 100
+            
+            if dist < min_dist
+                min_dist := dist
+                sr_strength := array.get(sr_touches, i)
+    
+    // Normalize distance (0-10%)
+    sr_distance = math.min(min_dist, 10.0) / 10.0 * 100
+    
+    // Strength score (1-10)
+    strength_score = math.min(sr_strength, 10)
+    
+    [sr_distance, strength_score]
+
+// ============================================================================
+// VOLUME ANALYSIS
+// ============================================================================
+calc_volume_features() =>
+    vol_sma = ta.sma(volume, vol_period)
+    vol_ratio = vol_sma > 0 ? volume / vol_sma : 1.0
+    
+    // Volume trend
+    vol_increasing = volume > volume[1] and volume[1] > volume[2]
+    vol_decreasing = volume < volume[1] and volume[1] < volume[2]
+    vol_trend = vol_increasing ? 1.0 : vol_decreasing ? -1.0 : 0.0
+    
+    // Price-Volume divergence
+    price_direction = close > close[5] ? 1 : close < close[5] ? -1 : 0
+    vol_direction = volume > ta.sma(volume[5], 5) ? 1 : volume < ta.sma(volume[5], 5) ? -1 : 0
+    
+    pv_divergence = 0.0
+    if price_direction == 1 and vol_direction == -1
+        pv_divergence := -1.0  // Bearish divergence
+    else if price_direction == -1 and vol_direction == 1
+        pv_divergence := 1.0  // Bullish divergence (accumulation)
+    
+    [vol_ratio, vol_trend, pv_divergence]
+
+// ============================================================================
+// ENHANCED FEATURES (12 Total)
+// ============================================================================
+// Original 5 features
+calc_price_position(len) =>
+    highest = ta.highest(high, len)
+    lowest = ta.lowest(low, len)
+    price_range = highest - lowest
+    price_range > 0 ? ((close - lowest) / price_range) * 100 : 50
+
+calc_trend_strength() =>
+    ema20 = ta.ema(close, 20)
+    ema20_old = ta.ema(close[10], 20)
+    ema20_old > 0 ? ((ema20 - ema20_old) / ema20_old) * 100 : 0
+
+calc_volatility() =>
+    atr_val = ta.atr(14)
+    atr_val / close * 100
+
+// Calculate all current features
+current_price_pos = calc_price_position(100)
+current_trend = calc_trend_strength()
+current_rsi = ta.rsi(close, 14)
+current_volatility = calc_volatility()
+[current_fvg_dist, current_fvg_bias] = calc_fvg_proximity()
+[current_sr_dist, current_sr_strength] = calc_sr_proximity()
+[current_vol_ratio, current_vol_trend, current_pv_div] = calc_volume_features()
+
+// ============================================================================
+// ENHANCED KNN PATTERN MATCHING (12 Features)
+// ============================================================================
+var float[] distances = array.new_float(0)
+var float[] outcomes = array.new_float(0)
+
+array.clear(distances)
+array.clear(outcomes)
+
+// Search historical patterns
+if bar_index > lookback_bars + prediction_horizon
+    for i = lookback_bars to prediction_horizon
+        // Calculate historical features
+        hist_price_pos = calc_price_position(100)[i]
+        hist_trend = calc_trend_strength()[i]
+        hist_rsi = ta.rsi(close[i], 14)
+        hist_volatility = calc_volatility()[i]
+        
+        // For historical bars, use simpler approximations
+        // (Full FVG/SR/Vol calculation on each historical bar would be too slow)
+        hist_fvg_dist = 5.0  // Default moderate distance
+        hist_fvg_bias = 0.0   // Neutral
+        hist_sr_dist = 50.0   // Default
+        hist_sr_strength = 3  // Default
+        hist_vol_ratio = 1.0  // Average
+        hist_vol_trend = 0.0  // Neutral
+        hist_pv_div = 0.0     // No divergence
+        
+        // Calculate weighted Euclidean distance
+        distance = 0.0
+        
+        // Feature 1-2: Price & Trend
+        price_diff = math.abs(current_price_pos - hist_price_pos) / 100
+        distance += price_diff * price_diff * weight_price
+        
+        trend_diff = math.abs(current_trend - hist_trend) / 10
+        distance += trend_diff * trend_diff * weight_trend
+        
+        // Feature 3: RSI
+        rsi_diff = math.abs(current_rsi - hist_rsi) / 100
+        distance += rsi_diff * rsi_diff * weight_rsi
+        
+        // Feature 4: Volatility
+        vol_diff = math.abs(current_volatility - hist_volatility) / 5
+        distance += vol_diff * vol_diff * weight_volatility
+        
+        // Feature 5-6: FVG
+        fvg_dist_diff = math.abs(current_fvg_dist - hist_fvg_dist) / 10
+        distance += fvg_dist_diff * fvg_dist_diff * weight_fvg * 0.6
+        
+        fvg_bias_diff = math.abs(current_fvg_bias - hist_fvg_bias)
+        distance += fvg_bias_diff * fvg_bias_diff * weight_fvg * 0.4
+        
+        // Feature 7-8: S/R
+        sr_dist_diff = math.abs(current_sr_dist - hist_sr_dist) / 100
+        distance += sr_dist_diff * sr_dist_diff * weight_sr * 0.7
+        
+        sr_strength_diff = math.abs(current_sr_strength - hist_sr_strength) / 10
+        distance += sr_strength_diff * sr_strength_diff * weight_sr * 0.3
+        
+        // Feature 9-11: Volume
+        vol_ratio_diff = math.abs(current_vol_ratio - hist_vol_ratio) / 2
+        distance += vol_ratio_diff * vol_ratio_diff * weight_volume * 0.5
+        
+        vol_trend_diff = math.abs(current_vol_trend - hist_vol_trend)
+        distance += vol_trend_diff * vol_trend_diff * weight_volume * 0.25
+        
+        pv_div_diff = math.abs(current_pv_div - hist_pv_div)
+        distance += pv_div_diff * pv_div_diff * weight_volume * 0.25
+        
+        distance := math.sqrt(distance)
+        
+        // Calculate outcome
+        outcome_price = close[i - prediction_horizon]
+        current_price = close[i]
+        outcome_pct = ((outcome_price - current_price) / current_price) * 100
+        
+        array.push(distances, distance)
+        array.push(outcomes, outcome_pct)
+
+// ============================================================================
+// FIND K NEAREST NEIGHBORS
+// ============================================================================
+var float[] top_k_outcomes = array.new_float(0)
+var float[] top_k_distances = array.new_float(0)
+array.clear(top_k_outcomes)
+array.clear(top_k_distances)
+
+
+if array.size(distances) >= k_neighbors and array.size(distances) > 0
+    // Selection sort for K smallest
+    for k = 0 to k_neighbors - 1
+        min_dist = 999999.0
+        min_idx = 0
+        
+        if array.size(distances) > 0
+            for i = 0 to array.size(distances) - 1
+                dist = array.get(distances, i)
+                
+                // Skip if already selected
+                already_selected = false
+                if array.size(top_k_distances) > 0
+                    for j = 0 to array.size(top_k_distances) - 1
+                        if math.abs(dist - array.get(top_k_distances, j)) < 0.001
+                            already_selected := true
+                            break
+                
+                if not already_selected and dist < min_dist
+                    min_dist := dist
+                    min_idx := i
+            
+            if min_dist < 999999.0 and min_idx < array.size(outcomes)
+                array.push(top_k_outcomes, array.get(outcomes, min_idx))
+                array.push(top_k_distances, min_dist)
+
+
+// ============================================================================
+// CALCULATE PREDICTION WITH ENHANCED CONFIDENCE
+// ============================================================================
+var float predicted_change = 0.0
+var float confidence_score = 0.0
+var string direction = "SIDEWAYS"
+var int quality_score = 0
+
+if array.size(top_k_outcomes) > 0
+    // Weighted average (closer neighbors have more weight)
+    sum_weighted = 0.0
+    sum_weights = 0.0
+    
+    for i = 0 to array.size(top_k_outcomes) - 1
+        outcome = array.get(top_k_outcomes, i)
+        dist = array.get(top_k_distances, i)
+        weight = 1.0 / (dist + 0.1)  // Inverse distance weighting
+        
+        sum_weighted += outcome * weight
+        sum_weights += weight
+    
+    predicted_change := sum_weights > 0 ? sum_weighted / sum_weights : 0
+    
+    // Confidence based on consistency
+    variance = 0.0
+    for i = 0 to array.size(top_k_outcomes) - 1
+        diff = array.get(top_k_outcomes, i) - predicted_change
+        variance += diff * diff
+    
+    variance := variance / array.size(top_k_outcomes)
+    std_dev = math.sqrt(variance)
+    
+    // Base confidence
+    confidence_score := math.min(100, 100 / (1 + std_dev * 1.5))
+    
+    // Boost confidence with V2 factors
+    if math.abs(current_fvg_bias) > 0.8  // Strong FVG bias
+        confidence_score += 5
+    
+    if current_sr_dist < 20 and current_sr_strength > 5  // Near strong S/R
+        confidence_score += 5
+    
+    if current_vol_ratio > vol_threshold  // High volume
+        confidence_score += 8
+    
+    if math.abs(current_pv_div) > 0.8  // Strong divergence
+        confidence_score += 7
+    
+    confidence_score := math.min(confidence_score, 100)
+    
+    // Direction classification
+    if predicted_change > 2.5
+        direction := "STRONG UP 🚀"
+    else if predicted_change > 0.8
+        direction := "UP ⬆️"
+    else if predicted_change < -2.5
+        direction := "STRONG DOWN 📉"
+    else if predicted_change < -0.8
+        direction := "DOWN ⬇️"
+    else
+        direction := "SIDEWAYS ↔️"
+    
+    // Quality score (0-100)
+    quality_score := int(confidence_score * 0.7)
+    quality_score += current_vol_ratio > 1.3 ? 10 : 0
+    quality_score += math.abs(current_fvg_bias) > 0.5 ? 10 : current_fvg_dist < 2.0 ? 5 : 0
+    quality_score += current_sr_strength > 5 ? 10 : 0
+    quality_score := math.min(quality_score, 100)
+
+// Target price
+target_price = close * (1 + predicted_change / 100)
+
+// ============================================================================
+// VISUALIZATION - FVG BOXES
+// ============================================================================
+if show_fvg_boxes and fvg_enabled and barstate.islast
+    // Draw stored bullish FVGs
+    for i = 0 to math.min(array.size(fvg_bull_tops) - 1, 19)
+        if i < array.size(fvg_bull_tops)
+            b_top = array.get(fvg_bull_tops, i)
+            b_bot = array.get(fvg_bull_bottoms, i)
+            fvg_bar = array.get(fvg_bull_bars, i)
+            
+            // Check if filled
+            filled = low <= b_bot
+            box_color = filled ? color.new(color.gray, 92) : color.new(color.green, 92)
+            border_color = filled ? color.new(color.gray, 70) : color.new(color.green, 60)
+            
+            box.new(fvg_bar, b_top, fvg_bar + 10, b_bot, bgcolor=box_color, border_color=border_color, border_width=1)
+    
+    // Draw stored bearish FVGs
+    for i = 0 to math.min(array.size(fvg_bear_tops) - 1, 19)
+        if i < array.size(fvg_bear_tops)
+            be_top = array.get(fvg_bear_tops, i)
+            be_bot = array.get(fvg_bear_bottoms, i)
+            fvg_bar = array.get(fvg_bear_bars, i)
+            
+            filled = high >= be_top
+            box_color = filled ? color.new(color.gray, 92) : color.new(color.red, 92)
+            border_color = filled ? color.new(color.gray, 70) : color.new(color.red, 60)
+            
+            box.new(fvg_bar, be_top, fvg_bar + 10, be_bot, bgcolor=box_color, border_color=border_color, border_width=1)
+
+// ============================================================================
+// VISUALIZATION - S/R LINES
+// ============================================================================
+if show_sr_lines and sr_enabled
+    // Draw major S/R levels
+    [s_high, s_low] = detect_swing()
+    
+    if not na(s_high)
+        line.new(bar_index - sr_swing_length, s_high, bar_index + 10, s_high, color=color.new(color.red, 40), width=2, style=line.style_dashed, extend=extend.right)
+        label.new(bar_index, s_high, "R", style=label.style_label_down, color=color.new(color.red, 30), textcolor=color.white, size=size.tiny)
+    
+    if not na(s_low)
+        line.new(bar_index - sr_swing_length, s_low, bar_index + 10, s_low, color=color.new(color.green, 40), width=2, style=line.style_dashed, extend=extend.right)
+        label.new(bar_index, s_low, "S", style=label.style_label_up, color=color.new(color.green, 30), textcolor=color.white, size=size.tiny)
+
+// ============================================================================
+// ENHANCED PREDICTION PANEL - IMPROVED UI
+// ============================================================================
+if show_prediction_panel and barstate.islast
+    panel_pos = panel_position == "Top Left" ? position.top_left : panel_position == "Top Right" ? position.top_right : panel_position == "Bottom Left" ? position.bottom_left : position.bottom_right
+    
+    var table pred_table = table.new(panel_pos, 2, 9, border_width=1)
+    
+    // Modern color scheme
+    bg_dark = color.new(#1a1a2e, 10)
+    bg_medium = color.new(#16213e, 15)
+    bg_light = color.new(#0f3460, 20)
+    text_primary = color.new(color.white, 0)
+    text_secondary = color.new(color.silver, 10)
+    
+    // Header with gradient effect
+    header_bg = predicted_change > 0 ? color.new(#00d9ff, 15) : predicted_change < 0 ? color.new(#ff006e, 15) : color.new(color.gray, 30)
+    
+    table.cell(pred_table, 0, 0, "🤖 KNN V2", bgcolor=header_bg, text_color=text_primary, text_size=size.normal, text_font_family=font.family_monospace)
+    table.cell(pred_table, 1, 0, direction, bgcolor=header_bg, text_color=text_primary, text_size=size.normal, text_font_family=font.family_monospace)
+    
+    // Main metrics with clean styling
+    table.cell(pred_table, 0, 1, "Target", bgcolor=bg_dark, text_color=text_secondary, text_size=size.small)
+    table.cell(pred_table, 1, 1, "$" + str.tostring(target_price, "#,###"), bgcolor=bg_medium, text_color=text_primary, text_size=size.small, text_font_family=font.family_monospace)
+    
+    table.cell(pred_table, 0, 2, "Change", bgcolor=bg_dark, text_color=text_secondary, text_size=size.small)
+    change_color = predicted_change > 2 ? color.new(#00ff88, 0) : predicted_change > 0 ? color.new(#88ff00, 0) : predicted_change < -2 ? color.new(#ff0055, 0) : color.new(#ff8800, 0)
+    table.cell(pred_table, 1, 2, str.tostring(predicted_change, "+#.##;-#.##") + "%", bgcolor=bg_medium, text_color=change_color, text_size=size.normal, text_font_family=font.family_monospace)
+    
+    table.cell(pred_table, 0, 3, "Confidence", bgcolor=bg_dark, text_color=text_secondary, text_size=size.small)
+    conf_color = confidence_score > 75 ? color.new(#00ff88, 0) : confidence_score > 60 ? color.new(#ffcc00, 0) : confidence_score > 45 ? color.new(#ff8800, 0) : color.new(#ff0055, 0)
+    conf_bar = "█"
+    conf_bars = ""
+    bars_count = int(confidence_score / 10)
+    for i = 0 to 9
+        conf_bars += i < bars_count ? conf_bar : "░"
+    table.cell(pred_table, 1, 3, str.tostring(confidence_score, "#") + "% " + conf_bars, bgcolor=bg_medium, text_color=conf_color, text_size=size.tiny, text_font_family=font.family_monospace)
+    
+    table.cell(pred_table, 0, 4, "Quality", bgcolor=bg_dark, text_color=text_secondary, text_size=size.small)
+    qual_color = quality_score > 80 ? color.new(#00ff88, 0) : quality_score > 65 ? color.new(#ffcc00, 0) : color.new(#ff8800, 0)
+    qual_emoji = quality_score > 80 ? "🔥" : quality_score > 65 ? "⚡" : "⚠️"
+    table.cell(pred_table, 1, 4, qual_emoji + " " + str.tostring(quality_score) + "/100", bgcolor=bg_medium, text_color=qual_color, text_size=size.small, text_font_family=font.family_monospace)
+    
+    // V2 Metrics section with icons
+    table.cell(pred_table, 0, 5, "━━━━━━━━━━━━", bgcolor=bg_light, text_color=color.new(color.gray, 60), text_size=size.tiny)
+    table.cell(pred_table, 1, 5, "V2 Analytics", bgcolor=bg_light, text_color=text_secondary, text_size=size.tiny)
+    
+    // FVG
+    fvg_icon = math.abs(current_fvg_bias) > 0.8 ? "🟢" : current_fvg_dist < 2 ? "🟡" : "⚪"
+    fvg_text = math.abs(current_fvg_bias) > 0.8 ? "Strong Gap" : current_fvg_dist < 2 ? "Near Gap" : "No Gap"
+    table.cell(pred_table, 0, 6, fvg_icon + " FVG", bgcolor=bg_dark, text_color=text_secondary, text_size=size.tiny)
+    table.cell(pred_table, 1, 6, fvg_text, bgcolor=bg_medium, text_color=text_primary, text_size=size.tiny)
+    
+    // S/R
+    sr_icon = current_sr_dist < 20 ? "🔴" : "🟢"
+    sr_text = current_sr_dist < 20 ? "Near (" + str.tostring(current_sr_strength, "#") + "x)" : "Clear"
+    table.cell(pred_table, 0, 7, sr_icon + " S/R", bgcolor=bg_dark, text_color=text_secondary, text_size=size.tiny)
+    table.cell(pred_table, 1, 7, sr_text, bgcolor=bg_medium, text_color=text_primary, text_size=size.tiny)
+    
+    // Volume & Divergence combined
+    vol_icon = current_vol_ratio > vol_threshold ? "🔊" : current_vol_ratio > 1.0 ? "🔉" : "🔇"
+    div_icon = current_pv_div > 0.5 ? "📈" : current_pv_div < -0.5 ? "📉" : "➡️"
+    vol_div_text = str.tostring(current_vol_ratio, "#.#") + "x " + (current_pv_div > 0.5 ? "Bull" : current_pv_div < -0.5 ? "Bear" : "Neutral")
+    table.cell(pred_table, 0, 8, vol_icon + " " + div_icon, bgcolor=bg_dark, text_color=text_secondary, text_size=size.tiny)
+    table.cell(pred_table, 1, 8, vol_div_text, bgcolor=bg_medium, text_color=text_primary, text_size=size.tiny)
+
+// ============================================================================
+// TARGET LINE & ZONE (FIXED - NO REPAINT)
+// ============================================================================
+// Store values on confirmed bar
+var float stored_target = na
+var float stored_predicted_change = na
+var int stored_bar = na
+
+// Update only on confirmed bars
+if barstate.isconfirmed and array.size(top_k_outcomes) > 0
+    stored_target := target_price
+    stored_predicted_change := predicted_change
+    stored_bar := bar_index
+
+// Draw lines from stored values (doesn't repaint)
+if show_target_line and not na(stored_target) and not na(stored_bar)
+    var line target_line = na
+    var label target_label = na
+    var box pred_zone = na
+    
+    // Only redraw on confirmed bars or last bar
+    if barstate.isconfirmed or barstate.islast
+        line.delete(target_line)
+        label.delete(target_label)
+        box.delete(pred_zone)
+        
+        // Target line - FIXED position from stored bar
+        line_color = stored_predicted_change > 0 ? color.new(color.green, 40) : color.new(color.red, 40)
+        target_line := line.new(stored_bar, stored_target, stored_bar + prediction_horizon, stored_target, color=line_color, width=2, style=line.style_dashed)
+        
+        target_label := label.new(stored_bar + prediction_horizon, stored_target, "🎯 " + str.tostring(stored_predicted_change, "#.#") + "%", style=label.style_label_left, color=line_color, textcolor=color.white, size=size.small)
+        
+        // Prediction zone - from stored bar close to target
+        zone_color = stored_predicted_change > 0 ? color.new(color.green, 94) : color.new(color.red, 94)
+        stored_close = close[bar_index - stored_bar]  // Close at prediction bar
+        zone_top = math.max(stored_close, stored_target)
+        zone_bottom = math.min(stored_close, stored_target)
+        
+        pred_zone := box.new(stored_bar, zone_top, stored_bar + prediction_horizon, zone_bottom, border_color=color.new(color.gray, 70), bgcolor=zone_color, border_width=1, border_style=line.style_dotted)
+
+// ============================================================================
+// BUY/SELL SIGNALS (Enhanced)
+// ============================================================================
+// Base conditions
+buy_signal_base = predicted_change > 1.2 and confidence_score >= min_confidence
+sell_signal_base = predicted_change < -1.2 and confidence_score >= min_confidence
+
+// V2 enhancements
+buy_enhanced = buy_signal_base and (current_vol_ratio > 1.2 or current_fvg_bias > 0.5 or current_pv_div > 0.5)
+sell_enhanced = sell_signal_base and (current_vol_ratio > 1.2 or current_fvg_bias < -0.5 or current_pv_div < -0.5)
+
+// Final signals with S/R filter
+buy_signal = show_signals and buy_enhanced and not (current_sr_dist < 15 and predicted_change > 0)  // Avoid resistance
+sell_signal = show_signals and sell_enhanced and not (current_sr_dist < 15 and predicted_change < 0)  // Avoid support
+
+plotshape(buy_signal, title="BUY V2", text="BUY", location=location.belowbar, style=shape.labelup, size=size.normal, color=color.new(color.green, 0), textcolor=color.white)
+plotshape(sell_signal, title="SELL V2", text="SELL", location=location.abovebar, style=shape.labeldown, size=size.normal, color=color.new(color.red, 0), textcolor=color.white)
+
+// Background colors
+strong_bull = predicted_change > 3 and confidence_score > 75
+strong_bear = predicted_change < -3 and confidence_score > 75
+
+bgcolor(strong_bull ? color.new(color.green, 92) : na, title="Strong Bull BG")
+bgcolor(strong_bear ? color.new(color.red, 92) : na, title="Strong Bear BG")
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(buy_signal, title="KNN V2 Buy", message="🤖 KNN V2: BUY Signal!\n📊 Target: {{target_price}}\n💯 Confidence: {{confidence_score}}%\n🎯 Quality: {{quality_score}}/100")
+alertcondition(sell_signal, title="KNN V2 Sell", message="🤖 KNN V2: SELL Signal!\n📊 Target: {{target_price}}\n💯 Confidence: {{confidence_score}}%\n🎯 Quality: {{quality_score}}/100")
+alertcondition(quality_score > 85, title="High Quality Signal", message="⚡ KNN V2: Very high quality prediction detected!")
+
